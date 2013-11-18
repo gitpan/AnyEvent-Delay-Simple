@@ -1,0 +1,15 @@
+Changes
+lib/AnyEvent/Delay/Simple.pm
+Makefile.PL
+MANIFEST
+MANIFEST.SKIP
+README
+t/00-use.t
+t/01-call.t
+t/90-pod.t
+t/91-pod-coverage.t
+t/92-manifest.t
+t/93-changes.t
+t/94-fixme.t
+META.yml                                 Module YAML meta-data (added by MakeMaker)
+META.json                                Module JSON meta-data (added by MakeMaker)
