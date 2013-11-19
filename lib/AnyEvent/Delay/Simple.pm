@@ -8,7 +8,7 @@ use AnyEvent;
 use parent 'Exporter';
 
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 
 our @EXPORT = qw(delay);
@@ -17,7 +17,7 @@ our @EXPORT = qw(delay);
 sub import {
 	my ($class, @args) = @_;
 
-	if (grep { $_ eq 'ae' } @args) {
+	if (grep { $_ && $_ eq 'ae' } @args) {
 		no strict 'refs';
 		*AE::delay = \&delay;
 	}
@@ -30,9 +30,9 @@ sub delay {
 	my $cb = pop();
 	my $cv = AE::cv;
 
-	$cv->begin;
+	$cv->begin();
+	$cv->cb(sub { $cb->($cv->recv()); });
 	_delay_step(@_, $cv);
-	$cv->cb($cb);
 	$cv->end();
 
 	return;
@@ -40,29 +40,39 @@ sub delay {
 
 sub _delay_step {
 	my ($cv) = pop();
-	my ($subs, $err) = @_;
+	my ($subs, $err, $args) = @_;
 
 	my $sub = shift(@$subs);
 
-	return unless $sub;
+	unless (defined($args)) {
+		$args = [];
+	}
+	unless ($sub) {
+		$cv->send(@$args);
+
+		return;
+	}
 
 	$cv->begin();
 	AE::postpone {
+		my @res;
+
 		if ($err) {
 			eval {
-				$sub->();
+				@res = $sub->(@$args);
 			};
 			if ($@) {
 				AE::log error => $@;
-				$cv->cb($err);
+				$cv->cb(sub { $err->($cv->recv()); });
+				$cv->send(@$args);
 			}
 			else {
-				_delay_step($subs, $err, $cv);
+				_delay_step($subs, $err, \@res, $cv);
 			}
 		}
 		else {
-			$sub->();
-			_delay_step($subs, $err, $cv);
+			@res = $sub->(@$args);
+			_delay_step($subs, $err, \@res, $cv);
 		}
 		$cv->end();
 	};
@@ -115,6 +125,10 @@ there are no more callbacks, or an error occurs in a callback. If an error
 occurs in one of the steps, the chain will be break, and error handler will
 call, if it's defined. Unless error handler defined, error is fatal. If last
 callback finishes and no error occurs, finish handler will call.
+
+Return values of each callbacks in chain passed as arguments to the next one,
+and result of last callback passed to the finish handler. If an error occurs
+then arguments of the failed callback passed to the error handler.
 
 You may import this function into L<AE> namespace instead of current one. Just
 use module with symbol C<ae>.
