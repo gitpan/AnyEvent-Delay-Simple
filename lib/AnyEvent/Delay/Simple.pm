@@ -5,40 +5,157 @@ use warnings;
 
 use AnyEvent;
 
-use parent 'Exporter';
+use parent qw(Exporter);
 
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 
-our @EXPORT = qw(delay);
+our @EXPORT    = qw(delay);
+our @EXPORT_OK = qw(easy_delay);
 
 
 sub import {
 	my ($class, @args) = @_;
 
-	if (grep { $_ && $_ eq 'ae' } @args) {
-		no strict 'refs';
-		*AE::delay = \&delay;
+	my (@ae, @up);
+
+	foreach (@args) {
+		if ($_ && /^AE::(.+)?/) {
+			push(@ae, $1);
+		}
+		else {
+			push(@up, $_);
+		}
 	}
-	else {
-		$class->export_to_level(1, @args);
+	if (@ae) {
+		$class->export('AE', @ae);
+	}
+	if (@up) {
+		$class->export_to_level(1, undef, @up);
 	}
 }
 
 sub delay {
-	my $cb = pop();
+	my $fin = pop();
+	my ($subs, $err);
+
+	return unless $fin;
+
+	if (ref($_[0]) eq 'ARRAY') {
+		$subs = shift();
+		$err  = pop();
+	}
+	else {
+		$err  = pop();
+		$subs = \@_;
+	}
+
 	my $cv = AE::cv;
 
 	$cv->begin();
-	$cv->cb(sub { $cb->($cv->recv()); });
-	_delay_step(@_, $cv);
+	$cv->cb(sub {
+		_delay_step([$fin], undef, [$cv->recv()], $cv);
+	});
+	_delay_step($subs, $err, $cv);
 	$cv->end();
 
 	return;
 }
 
 sub _delay_step {
+	my $cv = pop();
+	my ($subs, $err, $args) = @_;
+
+	my $sub = shift(@$subs);
+
+	unless (defined($args)) {
+		$args = [];
+	}
+	unless ($sub) {
+		$cv->send(@$args);
+
+		return;
+	}
+
+	$cv->begin();
+	AE::postpone {
+		my @res;
+		my $xcv = AE::cv;
+
+		$xcv->begin();
+		if ($err) {
+			eval {
+				$sub->($xcv, @$args);
+			};
+			if ($@) {
+				my $msg = $@;
+
+				AE::log error => $msg;
+				$cv->cb(sub {
+					_delay_step([$err], undef, [$msg], $cv);
+				});
+				$cv->send(@$args);
+				$cv->end();
+
+				undef($xcv);
+			}
+			else {
+				_delay_step_ex($subs, $err, $xcv, $cv);
+			}
+		}
+		else {
+			$sub->($xcv, @$args);
+			_delay_step_ex($subs, $err, $xcv, $cv);
+		}
+	};
+
+	return;
+}
+
+sub _delay_step_ex {
+	my ($subs, $err, $xcv, $cv) = @_;
+
+	my $cb = $xcv->cb();
+
+	$xcv->cb(sub {
+		$cb->() if $cb;
+		_delay_step($subs, $err, [$xcv->recv()], $cv);
+		$cv->end();
+	});
+	$xcv->end();
+
+	return;
+}
+
+sub easy_delay {
+	my $fin = pop();
+	my ($subs, $err);
+
+	return unless $fin;
+
+	if (ref($_[0]) eq 'ARRAY') {
+		$subs = shift();
+		$err  = pop();
+	}
+	else {
+		$err  = pop();
+		$subs = \@_;
+	}
+
+	my $cv = AE::cv;
+
+	$cv->begin();
+	$cv->cb(sub {
+		$fin->($cv->recv());
+	});
+	_easy_delay_step($subs, $err, $cv);
+	$cv->end();
+
+	return;
+}
+
+sub _easy_delay_step {
 	my ($cv) = pop();
 	my ($subs, $err, $args) = @_;
 
@@ -62,17 +179,21 @@ sub _delay_step {
 				@res = $sub->(@$args);
 			};
 			if ($@) {
-				AE::log error => $@;
-				$cv->cb(sub { $err->($cv->recv()); });
+				my $msg = $@;
+
+				AE::log error => $msg;
+				$cv->cb(sub {
+					$err->($msg);
+				});
 				$cv->send(@$args);
 			}
 			else {
-				_delay_step($subs, $err, \@res, $cv);
+				_easy_delay_step($subs, $err, \@res, $cv);
 			}
 		}
 		else {
 			@res = $sub->(@$args);
-			_delay_step($subs, $err, \@res, $cv);
+			_easy_delay_step($subs, $err, \@res, $cv);
 		}
 		$cv->end();
 	};
@@ -95,15 +216,28 @@ AnyEvent::Delay::Simple - Manage callbacks and control the flow of events by Any
     use AnyEvent::Delay::Simple;
 
     my $cv = AE::cv;
-    delay([
-        sub { say('1st step'); },
-        sub { say('2nd step'); die(); },
-        # Never calls because 2nd step failed
-        sub { say('3rd step'); }],
-        # Calls on error
-        sub { say('Fail: ' . $@); $cv->send(); },
-        # Calls on success
-        sub { say('Ok'); $cv->send(); }
+    delay(
+        sub {
+            say('1st step');
+            shift->send('1st result'); # send data to 2nd step
+        },
+        sub {
+            shift;
+            say(@_);                   # receive data from 1st step
+            say('2nd step');
+            die();
+        },
+        sub {                          # never calls because 2nd step failed
+            say('3rd step');
+        },
+        sub {                          # calls on error, at this time
+            say('Fail: ' . $_[1]);
+            $cv->send();
+        },
+        sub {                          # calls on success, not at this time
+            say('Ok');
+            $cv->send();
+        }
     );
     $cv->recv();
 
@@ -114,27 +248,68 @@ AnyEvent. This module inspired by L<Mojo::IOLoop::Delay>.
 
 =head1 FUNCTIONS
 
+Both functions runs the chain of callbacks, the first callback will run right
+away, and the next one once the previous callback finishes. This chain will
+continue until there are no more callbacks, or an error occurs in a callback.
+If an error occurs in one of the steps, the chain will be break, and error
+handler will call, if it's defined. Unless error handler defined, error is
+fatal. If last callback finishes and no error occurs, finish handler will call.
+
+You may import these functions into L<AE> namespace instead of current one.
+Just prefix function name with C<AE::> when using module.
+
+    use AnyEvent::Delay::Simple qw(AE::delay);
+    AE::delay(...);
+
 =head2 delay
 
-    delay(\@steps, $finish);
-    delay(\@steps, $error, $finish);
+    delay(\&cb_1, ..., \&cb_n, \&err, \&fin);
+    delay([\&cb_1, ..., \&cb_n], \&fin);
+    delay([\&cb_1, ..., \&cb_n], \&err, \&fin);
 
-Runs the chain of callbacks, the first callback will run right away, and the
-next one once the previous callback finishes. This chain will continue until
-there are no more callbacks, or an error occurs in a callback. If an error
-occurs in one of the steps, the chain will be break, and error handler will
-call, if it's defined. Unless error handler defined, error is fatal. If last
-callback finishes and no error occurs, finish handler will call.
 
-Return values of each callbacks in chain passed as arguments to the next one,
-and result of last callback passed to the finish handler. If an error occurs
-then arguments of the failed callback passed to the error handler.
+Condvar and data from previous step passed as arguments to each callback or
+finish handler. If an error occurs then condvar and error message passed to
+the error handler. The data sends to the next step by using condvar's C<send()>
+method.
 
-You may import this function into L<AE> namespace instead of current one. Just
-use module with symbol C<ae>.
+    sub {
+        my $cv = shift();
+        $cv->send('foo', 'bar');
+    },
+    sub {
+        my ($cv, @args) = @_;
+        # now @args is ('foo', 'bar')
+    },
 
-    use AnyEvent::Delay::Simple qw(ae);
-    AE::delay(...);
+Condvar can be used to control the flow of events within step.
+
+    sub {
+        my $cv = shift();
+        $cv->begin();
+        $cv->begin();
+        my $w1; $w1 = AE::timer 1.0, 0, sub { $cv->end(); undef($w1); };
+        my $w2; $w2 = AE::timer 2.0, 0, sub { $cv->end(); undef($w2); };
+        $cv->cb(sub { $cv->send('step finished'); });
+    }
+
+=head2 easy_delay
+
+    easy_delay(\&cb_1, ..., \&cb_n, \&err, \&fin);
+    easy_delay([\&cb_1, ..., \&cb_n], \&fin);
+    easy_delay([\&cb_1, ..., \&cb_n], \&err, \&fin);
+
+This function is similar to the previous function. But its arguments contains
+no condvar. And return values of each callbacks in chain passed as arguments to
+the next one.
+
+    sub {
+        return ('foo', 'bar');
+    },
+    sub {
+        my (@args) = @_;
+        # now @args is ('foo', 'bar')
+    },
 
 =head1 SEE ALSO
 
