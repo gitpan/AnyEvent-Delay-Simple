@@ -35,6 +35,7 @@
       "runtime" : {
          "requires" : {
             "AnyEvent" : "0",
+            "Scalar::Util" : "0",
             "parent" : "0",
             "perl" : "5.008001"
          }
@@ -52,5 +53,5 @@
          "url" : "http://github.com/AdCampRu/anyevent-delay-simple"
       }
    },
-   "version" : "0.04"
+   "version" : "0.05"
 }

@@ -3,12 +3,13 @@ package AnyEvent::Delay::Simple;
 use strict;
 use warnings;
 
-use AnyEvent;
+use AnyEvent ();
+use Scalar::Util qw(blessed);
 
 use parent qw(Exporter);
 
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 
 our @EXPORT    = qw(delay);
@@ -37,10 +38,16 @@ sub import {
 }
 
 sub delay {
-	my $fin = pop();
-	my ($subs, $err);
+	my ($obj, $fin);
+
+	if (blessed($_[0])) {
+		$obj = shift();
+	}
+	$fin = pop();
 
 	return unless $fin;
+
+	my ($subs, $err);
 
 	if (ref($_[0]) eq 'ARRAY') {
 		$subs = shift();
@@ -55,9 +62,9 @@ sub delay {
 
 	$cv->begin();
 	$cv->cb(sub {
-		_delay_step([$fin], undef, [$cv->recv()], $cv);
+		_delay_step($obj, [$fin], undef, [$cv->recv()], $cv);
 	});
-	_delay_step($subs, $err, $cv);
+	_delay_step($obj, $subs, $err, $cv);
 	$cv->end();
 
 	return;
@@ -65,7 +72,7 @@ sub delay {
 
 sub _delay_step {
 	my $cv = pop();
-	my ($subs, $err, $args) = @_;
+	my ($obj, $subs, $err, $args) = @_;
 
 	my $sub = shift(@$subs);
 
@@ -86,14 +93,14 @@ sub _delay_step {
 		$xcv->begin();
 		if ($err) {
 			eval {
-				$sub->($xcv, @$args);
+				$sub->($obj ? $obj : (), @$args, $xcv);
 			};
 			if ($@) {
 				my $msg = $@;
 
 				AE::log error => $msg;
 				$cv->cb(sub {
-					_delay_step([$err], undef, [$msg], $cv);
+					_delay_step($obj, [$err], undef, [$msg], $cv);
 				});
 				$cv->send(@$args);
 				$cv->end();
@@ -101,12 +108,12 @@ sub _delay_step {
 				undef($xcv);
 			}
 			else {
-				_delay_step_ex($subs, $err, $xcv, $cv);
+				_delay_step_ex($obj, $subs, $err, $xcv, $cv);
 			}
 		}
 		else {
-			$sub->($xcv, @$args);
-			_delay_step_ex($subs, $err, $xcv, $cv);
+			$sub->($obj ? $obj : (), @$args, $xcv);
+			_delay_step_ex($obj, $subs, $err, $xcv, $cv);
 		}
 	};
 
@@ -114,13 +121,13 @@ sub _delay_step {
 }
 
 sub _delay_step_ex {
-	my ($subs, $err, $xcv, $cv) = @_;
+	my ($obj, $subs, $err, $xcv, $cv) = @_;
 
 	my $cb = $xcv->cb();
 
 	$xcv->cb(sub {
 		$cb->() if $cb;
-		_delay_step($subs, $err, [$xcv->recv()], $cv);
+		_delay_step($obj, $subs, $err, [$xcv->recv()], $cv);
 		$cv->end();
 	});
 	$xcv->end();
@@ -129,10 +136,16 @@ sub _delay_step_ex {
 }
 
 sub easy_delay {
-	my $fin = pop();
-	my ($subs, $err);
+	my ($obj, $fin);
+
+	if (blessed($_[0])) {
+		$obj = shift();
+	}
+	$fin = pop();
 
 	return unless $fin;
+
+	my ($subs, $err);
 
 	if (ref($_[0]) eq 'ARRAY') {
 		$subs = shift();
@@ -147,9 +160,9 @@ sub easy_delay {
 
 	$cv->begin();
 	$cv->cb(sub {
-		$fin->($cv->recv());
+		$fin->($obj ? $obj : (), $cv->recv());
 	});
-	_easy_delay_step($subs, $err, $cv);
+	_easy_delay_step($obj, $subs, $err, $cv);
 	$cv->end();
 
 	return;
@@ -157,7 +170,7 @@ sub easy_delay {
 
 sub _easy_delay_step {
 	my ($cv) = pop();
-	my ($subs, $err, $args) = @_;
+	my ($obj, $subs, $err, $args) = @_;
 
 	my $sub = shift(@$subs);
 
@@ -176,24 +189,24 @@ sub _easy_delay_step {
 
 		if ($err) {
 			eval {
-				@res = $sub->(@$args);
+				@res = $sub->($obj ? $obj : (), @$args);
 			};
 			if ($@) {
 				my $msg = $@;
 
 				AE::log error => $msg;
 				$cv->cb(sub {
-					$err->($msg);
+					$err->($obj ? $obj : (), $msg);
 				});
 				$cv->send(@$args);
 			}
 			else {
-				_easy_delay_step($subs, $err, \@res, $cv);
+				_easy_delay_step($obj, $subs, $err, \@res, $cv);
 			}
 		}
 		else {
-			@res = $sub->(@$args);
-			_easy_delay_step($subs, $err, \@res, $cv);
+			@res = $sub->($obj ? $obj : (), @$args);
+			_easy_delay_step($obj, $subs, $err, \@res, $cv);
 		}
 		$cv->end();
 	};
@@ -219,10 +232,9 @@ AnyEvent::Delay::Simple - Manage callbacks and control the flow of events by Any
     delay(
         sub {
             say('1st step');
-            shift->send('1st result'); # send data to 2nd step
+            pop->send('1st result');   # send data to 2nd step
         },
         sub {
-            shift;
             say(@_);                   # receive data from 1st step
             say('2nd step');
             die();
@@ -267,6 +279,12 @@ Just prefix function name with C<AE::> when using module.
     delay([\&cb_1, ..., \&cb_n], \&fin);
     delay([\&cb_1, ..., \&cb_n], \&err, \&fin);
 
+    delay($obj, \&cb_1, ..., \&cb_n, \&err, \&fin);
+    delay($obj, [\&cb_1, ..., \&cb_n], \&fin);
+    delay($obj, [\&cb_1, ..., \&cb_n], \&err, \&fin);
+
+If the first argument is blessed reference then all callbacks will be calls as
+the methods of this object.
 
 Condvar and data from previous step passed as arguments to each callback or
 finish handler. If an error occurs then condvar and error message passed to
@@ -274,18 +292,19 @@ the error handler. The data sends to the next step by using condvar's C<send()>
 method.
 
     sub {
-        my $cv = shift();
+        my $cv = pop();
         $cv->send('foo', 'bar');
     },
     sub {
-        my ($cv, @args) = @_;
+        my $cv   = pop();
+        my @args = @_;
         # now @args is ('foo', 'bar')
     },
 
 Condvar can be used to control the flow of events within step.
 
     sub {
-        my $cv = shift();
+        my $cv = pop();
         $cv->begin();
         $cv->begin();
         my $w1; $w1 = AE::timer 1.0, 0, sub { $cv->end(); undef($w1); };
@@ -298,6 +317,10 @@ Condvar can be used to control the flow of events within step.
     easy_delay(\&cb_1, ..., \&cb_n, \&err, \&fin);
     easy_delay([\&cb_1, ..., \&cb_n], \&fin);
     easy_delay([\&cb_1, ..., \&cb_n], \&err, \&fin);
+
+    easy_delay($obj, \&cb_1, ..., \&cb_n, \&err, \&fin);
+    easy_delay($obj, [\&cb_1, ..., \&cb_n], \&fin);
+    easy_delay($obj, [\&cb_1, ..., \&cb_n], \&err, \&fin);
 
 This function is similar to the previous function. But its arguments contains
 no condvar. And return values of each callbacks in chain passed as arguments to
