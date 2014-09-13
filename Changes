@@ -1,4 +1,8 @@
-Revision history for perl module AnyEvent::AnyEvent::Delay::Simple
+Revision history for perl module AnyEvent::Delay::Simple
+
+0.06    2014-09-13
+        - Fixed handling of exceptions that may be raised into condvar
+          callbacks.
 
 0.05    2014-02-24
         [Incompatible changes]
